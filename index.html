@@ -255,7 +255,7 @@ a{color:inherit}
 .card-hd .r{margin-left:auto;display:flex;gap:var(--s2);align-items:center}
 
 /* stat cards */
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--s4);
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--s4);
   margin-bottom:var(--s5)}
 .stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);
   padding:16px 18px;box-shadow:var(--sh-sm);transition:transform .25s,box-shadow .25s}
@@ -500,10 +500,15 @@ const ROLES = {
   grsm: {label:'Group Regional Sales Manager', desc:'Approver', short:'GRSM', chain:'GRSM'},
   nsm:  {label:'National Sales Manager',       desc:'Approver', short:'NSM',  chain:'NSM'},
   sd:   {label:'Sales Director',               desc:'Approver', short:'SD',   chain:'SD'},
+  // Subdist (= Distributor, see Section 0a) — external user: the Distributor's Owner or their SA.
+  // Access via a SEPARATE login mechanism, NOT the Web FiCom SSO used by every role above
+  // (Section 8). Real auth design is out of scope for this prototype — needs security/IT input.
+  // Scope: submit + track requests for ALL outlets the Distributor covers (DISTRIBUTOR_OUTLETS).
+  subdist:{label:'Subdist (Distributor)', desc:'Akses langsung — Owner / SA distributor', short:'SC', chain:null, distributor:'PT Distributor Utama'},
 };
 const MODULES = {
   dashboard:  {label:'Dashboard',   roles:['admin','at','sa'],                            icon:iDash},
-  requests:   {label:'Requests',    roles:['admin','at','sa'],                            icon:iReq},
+  requests:   {label:'Requests',    roles:['admin','at','sa','subdist'],                  icon:iReq},
   approvals:  {label:'Approvals',   roles:['admin','ss','rsm','grsm','nsm','sd'],          icon:iAppr},
   fulfillment:{label:'Fulfillment', roles:['admin','at'],                                  icon:iTruck},
   settings:   {label:'Settings',    roles:['admin','at'],                                  icon:iSet},
@@ -520,14 +525,27 @@ const ROLE_LABELS = {
 };
 const CATEGORY_HIERARCHY = {
   Barcode: ['SA','SS','RSM','GRSM','NSM','SD'],
-  Android: ['Cabang','GRSM','NSM','SD'],
   Server:  ['Cabang','GRSM','NSM','SD'],
+  // PLACEHOLDER (Section 2): Mobile Printer approval hierarchy not yet specified by the
+  // business — defaulted to mirror Server (no Replace path). MUST be confirmed before ship.
+  'Mobile Printer': ['Cabang','GRSM','NSM','SD'],
 };
+// Android's approval-chain CEILING depends on the request type (Section 1 REVISION).
+// Sales Director never approves Android under either path.
+const ANDROID_HIERARCHY_BY_TYPE = {
+  'Replace':    ['Cabang','GRSM','NSM'], // unit swap (has IMEI reference) — stops at NSM
+  'Penambahan': ['Cabang','GRSM'],       // new MPP / spare unit — stops at GRSM
+};
+function categoryHierarchy(category, requestType){
+  if(category==='Android') return ANDROID_HIERARCHY_BY_TYPE[requestType] || ANDROID_HIERARCHY_BY_TYPE['Replace'];
+  return CATEGORY_HIERARCHY[category] || [];
+}
 // role yang boleh dipilih sebagai Requester Role di form (subset dari hierarki di atas)
 const REQUESTER_ROLES_BY_CATEGORY = {
   Barcode: ['SA','SS','RSM','GRSM','NSM','SD'],
-  Android: ['Cabang','SD'],
+  Android: ['Cabang'],           // Section 1: SD removed — no longer a valid Android requester
   Server:  ['Cabang','SD'],
+  'Mobile Printer': ['Cabang','SD'],
 };
 const DISTRIBUTORS = ['PT Distributor Utama','PT Karya Selaras','PT Mitra Jaya Abadi','CV Sumber Makmur'];
 // 1 distributor cover banyak outlet — pilih distributor dulu, baru outlet-nya ter-filter otomatis
@@ -538,10 +556,24 @@ const DISTRIBUTOR_OUTLETS = {
   'CV Sumber Makmur': ['Cirebon Kota'],
 };
 const SALES_DIVISIONS = ['M1 BIS','M1 CWC','M245','M3'];
-const REQ_TYPES = ['Baru','Peremajaan'];
+// Android Request Type (Section 1). Business terms from the 10 Sep review are
+// "Replace" / "Penambahan". Prototype maps the old Peremajaan→Replace, Baru→Penambahan —
+// ⚠️ mapping still needs business confirmation (open question #1).
+const ANDROID_REQ_TYPES = ['Replace','Penambahan'];
+// Barcode "Tipe Pengajuan" with quantity per type (Section 3). Total = sum, auto-computed.
+// ⚠️ open question #4: predecessor MyMax used Rusak/Hilang/Penambahan MPP/Penambahan Outlet/Cadangan —
+// confirm whether the 4 below are canonical before building for real.
+const BARCODE_REQ_TYPES = ['Rusak','Hilang','NOO','Buffer Stock'];
 const FULFILL_STAGES = ['Processing','Shipped','Delivered'];
 const PHONE_BRANDS = ['Samsung','Vivo','Xiaomi'];
 const PHONE_MODELS = ['A07','A54','V21','5T'];
+// how a category ships during Fulfillment (Section 7)
+const SHIPPING_PATTERN = {
+  Android: 'hq',           // to HQ / Asset Team first, then BA Kepemilikan, then to Subdist
+  Server:  'dropship',     // directly to branch / Subdist
+  Barcode: 'hq',
+  'Mobile Printer': 'hq',  // PLACEHOLDER (Section 2/7) — pattern unconfirmed, defaulted to Android's
+};
 function yearOptions(from,to){ let o=''; for(let y=to;y>=from;y--) o+=`<option>${y}</option>`; return o; }
 // mock IMEI lookup — TAC (8 digit prefix) -> device info, simulates a real device-database scan lookup
 const MOCK_IMEI_DB = {
@@ -555,21 +587,66 @@ function lookupImei(imei){
   return MOCK_IMEI_DB[prefix]||null;
 }
 
-function computeChain(category, requesterRole){
-  const levels = CATEGORY_HIERARCHY[category] || [];
+function computeChain(category, requesterRole, requestType){
+  const levels = categoryHierarchy(category, requestType);
   const idx = levels.indexOf(requesterRole);
   return idx===-1 ? levels.slice() : levels.slice(idx+1);
 }
 
+/* ---------- document & attachment rules (Section 6) ----------
+   Driven by a data function so it's easy to extend without touching each screen. */
+function requiredAttachments(o){
+  // o: request-like {type, reqType, salesDivision, replacementType, barcodeTypes}
+  const list=[];
+  if(o.type==='Android'){
+    if(o.reqType==='Replace'){
+      list.push({name:'Form pengajuan penggantian', note:'Wajib untuk semua penggantian Android.'});
+      if(o.replacementType!=='Non-subsidi')
+        list.push({name:'Foto unit lama (kondisi menyala)', note:'Bukti anti-fraud untuk klaim subsidi.'});
+    } else if(o.reqType==='Penambahan'){
+      list.push({name:'Form request Android', note:'Wajib untuk penambahan unit / MPP.'});
+      list.push({name:'SISDIMA Plan', note:'Wajib melampirkan SISDIMA Plan untuk pengajuan Penambahan MPP.'});
+    }
+  } else if(o.type==='Barcode'){
+    list.push({name:'Berita Acara (BA) Form Request Barcode', note:'Wajib untuk semua request Barcode.'});
+    list.push({name:'Report Monitoring Barcode vs CB', note:'Dari Matrix / MatrixPro.'});
+    // ⚠️ open question #9: kondisi persis "Report Monitoring Utilisasi HHT" tidak lengkap di catatan review.
+    list.push({name:'Report Monitoring Utilisasi HHT', note:'Diperlukan pada kondisi tertentu (perlu konfirmasi bisnis).'});
+    // ⚠️ tidak ada tipe "Penambahan MPP" di 4-tipe Barcode — pakai Buffer Stock sebagai pendekatan sementara.
+    if(o.barcodeTypes && (o.barcodeTypes['Buffer Stock']||0) > 0)
+      list.push({name:'SISDIMA Plan', note:'Untuk pengajuan bersifat penambahan (Buffer Stock).'});
+    if(o.salesDivision==='M3')
+      list.push({name:'Surat Pernyataan Pertanggungjawaban Barcode', note:'Khusus Sales Division M3, diminta oleh Sales Director.'});
+  } else if(o.type==='Server'){
+    list.push({name:'Policy Implementasi SISTIMA', note:'Ditandatangani RSM dan Subdist.'});
+  }
+  // Mobile Printer: belum ada lampiran yang ditentukan bisnis.
+  return list;
+}
+// Documents produced DURING fulfillment (checklist / status, not attached upfront).
+function fulfillmentDocs(o){
+  const list=[{name:'PO dari Vendor', note:'Dirilis sistem saat fulfillment masuk tahap Processing.'}];
+  if(o.type==='Android')
+    list.push({name:'BA Kepemilikan', note:'Dibuat setelah unit diterima dari vendor — dasar penagihan Finance ke Subdist.'});
+  if(o.type==='Server'){
+    list.push({name:'BA Serah Terima Server (BA STS)', note:'Termasuk spesifikasi detail — dibuat Tim APPS.'});
+    list.push({name:'Berita Perhitungan Server Subdist', note:'Acuan cicilan (server dibayar cicilan 6 bulan) — dibuat Tim APPS.'});
+  }
+  return list;
+}
+
 /* ---------- mock data (fungsi dari deck, bukan desainnya) ---------- */
 let REQUESTS = [
-  mkReq({id:'REQ-2093',outlet:'Cirebon Kota',category:'Barcode',qty:6,pri:'high',
+  mkReq({id:'REQ-2093',outlet:'Cirebon Kota',category:'Barcode',pri:'high',
+    barcodeTypes:{Rusak:3,Hilang:1,NOO:2,'Buffer Stock':0},
     distributor:'CV Sumber Makmur',salesDivision:'M1 BIS',requesterRole:'SA',requesterName:'Laras P.',
     date:'12 Jul 2026',step:0}),
-  mkReq({id:'REQ-2091',outlet:'Bandung Kota',category:'Barcode',qty:4,pri:'high',
+  mkReq({id:'REQ-2091',outlet:'Bandung Kota',category:'Barcode',pri:'high',
+    barcodeTypes:{Rusak:2,Hilang:0,NOO:2,'Buffer Stock':0},
     distributor:'PT Distributor Utama',salesDivision:'M1 CWC',requesterRole:'SS',requesterName:'Dimas W.',
     date:'12 Jul 2026',step:0}),
-  mkReq({id:'REQ-2089',outlet:'Depok Tengah',category:'Barcode',qty:5,pri:'normal',
+  mkReq({id:'REQ-2089',outlet:'Depok Tengah',category:'Barcode',pri:'normal',
+    barcodeTypes:{Rusak:2,Hilang:1,NOO:0,'Buffer Stock':2},
     distributor:'PT Distributor Utama',salesDivision:'M1 BIS',requesterRole:'RSM',requesterName:'Eka P.',
     date:'11 Jul 2026',step:0}),
   mkReq({id:'REQ-2090',outlet:'Cirebon Kota',category:'Server',qty:6,pri:'high',
@@ -577,40 +654,63 @@ let REQUESTS = [
     date:'12 Jul 2026',step:0}),
   mkReq({id:'REQ-2088',outlet:'Surabaya Timur',category:'Android',qty:8,pri:'normal',
     distributor:'PT Karya Selaras',salesDivision:'M245',requesterRole:'Cabang',requesterName:'Rani S.',
-    reqType:'Baru',date:'11 Jul 2026',step:1}),
+    reqType:'Replace',replacementType:'Subsidi',date:'11 Jul 2026',step:1}),
+  mkReq({id:'REQ-2087',outlet:'Bandung Kota',category:'Mobile Printer',qty:4,pri:'normal',
+    distributor:'PT Distributor Utama',salesDivision:'M1 CWC',requesterRole:'Cabang',requesterName:'Sinta R.',
+    date:'10 Jul 2026',step:0}),
   mkReq({id:'REQ-2086',outlet:'Bekasi Utara',category:'Android',qty:5,pri:'normal',
     distributor:'PT Karya Selaras',salesDivision:'M245',requesterRole:'Cabang',requesterName:'Wulan D.',
-    reqType:'Baru',date:'07 Jul 2026',step:3,fulfillStep:0}),
+    reqType:'Penambahan',jumlahSales:30,date:'07 Jul 2026',step:1,fulfillStep:0}),
   mkReq({id:'REQ-2085',outlet:'Medan Kota',category:'Server',qty:4,pri:'urgent',
     distributor:'PT Mitra Jaya Abadi',salesDivision:'M3',requesterRole:'Cabang',requesterName:'Agus T.',
     date:'10 Jul 2026',step:3,fulfillStep:1,
-    fulfillData:{specs:'4x PC — Intel i5, 16GB RAM, 512GB SSD, Windows 11 Pro, untuk kasir outlet.'}}),
-  mkReq({id:'REQ-2083',outlet:'Bandung Kota',category:'Barcode',qty:6,pri:'urgent',
+    fulfillData:{specs:'4x PC — Intel i5, 16GB RAM, 512GB SSD, Windows 11 Pro, untuk kasir outlet.',
+      shipTo:'Jl. Merdeka No. 12, Medan Kota — a.n. Subdist Medan'},
+    fulfillDocs:{'PO dari Vendor':{fileName:'PO-88190.pdf',uploadedAt:'10 Jul 2026'}}}),
+  mkReq({id:'REQ-2084',outlet:'Bekasi Utara',category:'Mobile Printer',qty:3,pri:'normal',
+    distributor:'PT Karya Selaras',salesDivision:'M1 BIS',requesterRole:'Cabang',requesterName:'Bayu S.',
+    date:'06 Jul 2026',step:3,fulfillStep:0}),
+  mkReq({id:'REQ-2083',outlet:'Bandung Kota',category:'Barcode',pri:'urgent',
+    barcodeTypes:{Rusak:3,Hilang:2,NOO:1,'Buffer Stock':0},
     distributor:'PT Distributor Utama',salesDivision:'M1 CWC',requesterRole:'SS',requesterName:'Yoga P.',
     date:'06 Jul 2026',step:4,fulfillStep:0}),
-  mkReq({id:'REQ-2081',outlet:'Bekasi Utara',category:'Barcode',qty:5,pri:'normal',
+  mkReq({id:'REQ-2082',outlet:'Surabaya Timur',category:'Android',qty:2,pri:'high',
+    distributor:'PT Karya Selaras',salesDivision:'M245',requesterRole:'Cabang',requesterName:'Hendra P.',
+    reqType:'Replace',replacementType:'Non-subsidi',date:'05 Jul 2026',step:0}),
+  mkReq({id:'REQ-2081',outlet:'Bekasi Utara',category:'Barcode',pri:'normal',
+    barcodeTypes:{Rusak:3,Hilang:0,NOO:2,'Buffer Stock':0},
     distributor:'PT Karya Selaras',salesDivision:'M1 BIS',requesterRole:'RSM',requesterName:'Nadia F.',
     date:'09 Jul 2026',step:3,fulfillStep:3,
-    fulfillData:{codes:['BC-100120','BC-100121','BC-100122','BC-100123','BC-100124']}}),
-  mkReq({id:'REQ-2078',outlet:'Depok Tengah',category:'Barcode',qty:5,pri:'normal',
+    fulfillData:{codes:['BC-100120','BC-100121','BC-100122','BC-100123','BC-100124']},
+    attachments:{'Berita Acara (BA) Form Request Barcode':{fileName:'BA-Barcode-2081.pdf',uploadedAt:'09 Jul 2026'},
+      'Report Monitoring Barcode vs CB':{fileName:'monitoring-2081.xlsx',uploadedAt:'09 Jul 2026'}},
+    fulfillDocs:{'PO dari Vendor':{fileName:'PO-88155.pdf',uploadedAt:'09 Jul 2026'}}}),
+  mkReq({id:'REQ-2078',outlet:'Depok Tengah',category:'Barcode',pri:'normal',
+    barcodeTypes:{Rusak:5,Hilang:0,NOO:0,'Buffer Stock':0},
     distributor:'PT Distributor Utama',salesDivision:'M1 CWC',requesterRole:'SA',requesterName:'Rio K.',
     date:'08 Jul 2026',step:-1}),
   mkReq({id:'REQ-2074',outlet:'Medan Kota',category:'Android',qty:3,pri:'normal',
-    distributor:'PT Mitra Jaya Abadi',salesDivision:'M245',requesterRole:'SD',requesterName:'Bu Lita',
-    reqType:'Peremajaan',date:'05 Jul 2026',step:0,fulfillStep:3,
+    distributor:'PT Mitra Jaya Abadi',salesDivision:'M245',requesterRole:'Cabang',requesterName:'Bu Lita',
+    reqType:'Replace',replacementType:'Subsidi',date:'05 Jul 2026',step:2,fulfillStep:3,
     fulfillData:{units:[
       {imei:'356938035643809',brand:'Samsung',model:'A54',releaseYear:'2023',regYear:'2026'},
       {imei:'356938035643810',brand:'Samsung',model:'A54',releaseYear:'2023',regYear:'2026'},
       {imei:'862345018812345',brand:'Vivo',model:'V21',releaseYear:'2021',regYear:'2026'},
-    ]}}),
+    ]},
+    fulfillDocs:{'PO dari Vendor':{fileName:'PO-88090.pdf',uploadedAt:'05 Jul 2026'},
+      'BA Kepemilikan':{fileName:'BA-Kepemilikan-2074.pdf',uploadedAt:'08 Jul 2026'}}}),
   mkReq({id:'REQ-2070',outlet:'Cirebon Kota',category:'Server',qty:2,pri:'urgent',
     distributor:'CV Sumber Makmur',salesDivision:'M3',requesterRole:'Cabang',requesterName:'Andi P.',
     date:'03 Jul 2026',step:-2}),
 ];
 // step = index node "current" di r.chain. -1 = revisi. -2 = rejected. step===chain.length = approval selesai.
 function mkReq(o){
-  const chainRoles = computeChain(o.category, o.requesterRole);
+  const chainRoles = computeChain(o.category, o.requesterRole, o.reqType);
   const step = o.step!=null ? o.step : 0;
+  // Barcode: qty = jumlah dari breakdown per-tipe (Section 3)
+  const qty = (o.category==='Barcode' && o.barcodeTypes)
+    ? Object.values(o.barcodeTypes).reduce((a,b)=>a+(+b||0),0)
+    : o.qty;
   const chain = chainRoles.map((role,i)=>{
     let status='pending';
     if(step===-1){ if(i===0)status='approved'; else if(i===1)status='revision'; }
@@ -635,8 +735,14 @@ function mkReq(o){
       : {cls:'brand',t:'Fulfillment — '+FULFILL_STAGES[fulfillStep]};
   }
   else statusTag={cls:'warn',t:'Waiting — '+(ROLE_LABELS[chainRoles[step]]||chainRoles[step])};
-  return {id:o.id,outlet:o.outlet,type:o.category,qty:o.qty,pri:o.pri,
+  const notResolved = !(step>=chain.length && fulfillStep>=FULFILL_STAGES.length);
+  const outstandingAsset = o.category==='Android' && o.reqType==='Replace'
+    && o.replacementType==='Non-subsidi' && notResolved;  // Section 9 (Android-only)
+  return {id:o.id,outlet:o.outlet,type:o.category,qty,pri:o.pri,
     distributor:o.distributor,salesDivision:o.salesDivision,reqType:o.reqType||null,
+    barcodeTypes:o.barcodeTypes||null, jumlahSales:o.jumlahSales||null,
+    replacementType:o.replacementType||null, outstandingAsset,
+    attachments:o.attachments||{}, fulfillDocs:o.fulfillDocs||{},
     by:o.requesterName,byRole:o.requesterRole,date:o.date,
     step,chain,hist,statusTag,fulfillStep,fulfillData:o.fulfillData||null};
 }
@@ -692,7 +798,7 @@ function render(){
   if(state.module==='dashboard') main.innerHTML=viewDashboard();
   else if(state.module==='requests'){
     main.innerHTML= state.view? viewRequestDetail(state.view):viewRequests();
-    if(state.view==='new'){ populateRequesterRoleOptions('Barcode'); updateRoutePreview(); }
+    if(state.view==='new'){ populateRequesterRoleOptions('Barcode'); syncNewReqForm(); }
   }
   else if(state.module==='approvals') main.innerHTML= state.view? viewApprovalDetail(state.view):viewApprovals();
   else if(state.module==='fulfillment') main.innerHTML= state.view? viewFulfillmentDetail(state.view):viewFulfillment();
@@ -723,6 +829,7 @@ function viewDashboard(){
   const pending=REQUESTS.filter(r=>r.step>=0&&r.step<r.chain.length).length;
   const inProg=REQUESTS.filter(r=>r.step>=0&&r.step>=r.chain.length&&r.fulfillStep>=0&&r.fulfillStep<FULFILL_STAGES.length).length;
   const done=REQUESTS.filter(r=>r.fulfillStep>=FULFILL_STAGES.length).length;
+  const outstanding=REQUESTS.filter(r=>r.outstandingAsset).length;  // Section 9 (Android non-subsidi)
   const chartData=[['Jan',6,5,3],['Feb',8,7,3],['Mar',10,8,4],['Apr',7,7,3],
     ['May',12,10,4],['Jun',11,9,4],['Jul',9,8,3],['Aug',3,3,1]];
   const maxV=Math.max(...chartData.flatMap(d=>[d[1],d[2],d[3]]));
@@ -740,7 +847,13 @@ function viewDashboard(){
     ${stat('Pending Approval',pending,'menunggu approval',iClock,'var(--warn)','var(--warn-050)')}
     ${stat('In Progress',inProg,'proses & fulfillment',iTruck,'var(--brand)','var(--brand-050)')}
     ${stat('Assets Registered','1,247','total terdaftar',iBox,'var(--go)','var(--go-050)')}
+    ${stat('Outstanding Assets',outstanding,'Android non-subsidi',iBox,'var(--stop)','var(--stop-050)')}
   </div>
+  ${outstanding?`<div class="callout" style="margin-top:0;margin-bottom:24px;border-color:var(--stop-line)">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--stop)"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>
+    <div><b>${outstanding} Outstanding Asset</b> — penggantian Android <b>non-subsidi</b> (unit hilang) yang belum lunas/terkirim. Subdist wajib membeli unit pengganti dari perusahaan agar tetap berhak atas jalur subsidi berikutnya.
+      <button class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="go('requests');setReqFilter('status','Outstanding Asset')">Lihat daftar</button></div>
+  </div>`:''}
 
   <div class="grid-2">
     <div class="card chart-card">
@@ -796,9 +909,16 @@ function viewDashboard(){
 let reqFilter={q:'',type:'All types',status:'All status'};
 function isReqFiltered(){ return !!(reqFilter.q||reqFilter.type!=='All types'||reqFilter.status!=='All status'); }
 function setReqFilter(k,v){ reqFilter[k]=v; document.getElementById('req-tbl-wrap').innerHTML=requestTable(filteredRequests(),'requests',isReqFiltered()); }
+// Section 8: a Subdist (Distributor) login only sees requests for outlets its Distributor covers.
+function scopedRequests(){
+  if(state.role!=='subdist') return REQUESTS;
+  const dist=ROLES.subdist.distributor;
+  const outlets=DISTRIBUTOR_OUTLETS[dist]||[];
+  return REQUESTS.filter(r=>r.distributor===dist || outlets.includes(r.outlet));
+}
 function filteredRequests(){
   const q=reqFilter.q.trim().toLowerCase();
-  return REQUESTS.filter(r=>{
+  return scopedRequests().filter(r=>{
     if(q && !(r.id.toLowerCase().includes(q)||r.outlet.toLowerCase().includes(q)||r.by.toLowerCase().includes(q))) return false;
     if(reqFilter.type!=='All types' && r.type!==reqFilter.type) return false;
     if(reqFilter.status!=='All status'){
@@ -806,32 +926,39 @@ function filteredRequests(){
       if(s==='Waiting' && !(r.step>=0&&r.step<r.chain.length)) return false;
       if(s==='In progress' && !(r.step>=0&&r.step>=r.chain.length&&r.fulfillStep>=0&&r.fulfillStep<FULFILL_STAGES.length)) return false;
       if(s==='Completed' && r.fulfillStep!==FULFILL_STAGES.length) return false;
+      if(s==='Outstanding Asset' && !r.outstandingAsset) return false;
     }
     return true;
   });
 }
 function viewRequests(){
-  const canCreate=['admin','at','sa'].includes(state.role);
+  const canCreate=['admin','at','sa','subdist'].includes(state.role);
+  const isSubdist=state.role==='subdist';
+  const opt=(cur,v,label)=>`<option ${cur===v?'selected':''}>${label||v}</option>`;
   return `
   <div class="page-head">
     <div class="ttl">
       <div class="eyebrow" style="margin-bottom:6px">Asset workflow</div>
       <h1>Requests</h1>
-      <p>Ajukan dan telusuri permintaan aset — barcode, smartphone, dan server.</p>
+      <p>Ajukan dan telusuri permintaan aset — barcode, Android, server, dan mobile printer.</p>
     </div>
     <div class="actions">
       ${canCreate?`<button class="btn btn-primary" onclick="openItem('requests','new')">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>New request</button>`:''}
     </div>
   </div>
+  ${isSubdist?`<div class="callout" style="margin-top:0;margin-bottom:20px">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>
+    <div>Login <b>Subdist (${ROLES.subdist.distributor})</b> — akses langsung, terpisah dari SSO Web FiCom (mekanisme login sebenarnya belum ditentukan, perlu input security/IT). Cakupan: ajukan &amp; pantau request untuk <b>semua outlet</b> yang dicover distributor ini. Pengaju bisa SA atau <b>Owner</b> distributor; dokumen BA fisik biasanya ditandatangani Owner — Sales Supervisor mendapat notifikasi "Awaiting Owner signature".</div>
+  </div>`:''}
   <div class="card">
     <div class="fbar">
       <div class="fsearch">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
         <input value="${reqFilter.q}" oninput="setReqFilter('q',this.value)" placeholder="Cari ID, outlet, atau requester…">
       </div>
-      <select onchange="setReqFilter('type',this.value)"><option ${reqFilter.type==='All types'?'selected':''}>All types</option><option ${reqFilter.type==='Barcode'?'selected':''}>Barcode</option><option ${reqFilter.type==='Android'?'selected':''}>Android</option><option ${reqFilter.type==='Server'?'selected':''}>Server</option></select>
-      <select onchange="setReqFilter('status',this.value)"><option ${reqFilter.status==='All status'?'selected':''}>All status</option><option ${reqFilter.status==='Waiting'?'selected':''}>Waiting</option><option ${reqFilter.status==='In progress'?'selected':''}>In progress</option><option ${reqFilter.status==='Completed'?'selected':''}>Completed</option></select>
+      <select onchange="setReqFilter('type',this.value)">${['All types','Barcode','Android','Server','Mobile Printer'].map(v=>opt(reqFilter.type,v)).join('')}</select>
+      <select onchange="setReqFilter('status',this.value)">${['All status','Waiting','In progress','Completed','Outstanding Asset'].map(v=>opt(reqFilter.status,v)).join('')}</select>
     </div>
     <div id="req-tbl-wrap">${requestTable(filteredRequests(),'requests',isReqFiltered())}</div>
   </div>`;
@@ -868,6 +995,7 @@ function viewRequestDetail(id){
           <dt>Quantity</dt><dd class="mono">${r.qty} pcs</dd>
           <dt>Priority</dt><dd>${priTag(r.pri)}</dd>
           ${r.reqType?`<dt>Request Type</dt><dd>${r.reqType}</dd>`:''}
+          ${reqDetailRows(r)}
           <dt>Requested by</dt><dd>${r.by}</dd>
           <dt>Requester role</dt><dd>${ROLE_LABELS[r.byRole]||r.byRole}</dd>
           <dt>Submitted</dt><dd class="mono">${r.date}</dd>
@@ -877,6 +1005,48 @@ function viewRequestDetail(id){
     <div class="card">
       <div class="card-hd"><h3>Approval history</h3></div>
       <div class="card-pad">${timeline(r.hist)}</div>
+    </div>
+  </div>
+  ${attachmentsCard(r)}`;
+}
+function reqDetailRows(r){
+  let h='';
+  if(r.barcodeTypes){
+    const parts=BARCODE_REQ_TYPES.filter(k=>(r.barcodeTypes[k]||0)>0).map(k=>`${k} ${r.barcodeTypes[k]}`);
+    h+=`<dt>Tipe Pengajuan</dt><dd>${parts.join(' · ')||'—'}</dd>`;
+  }
+  if(r.replacementType)
+    h+=`<dt>Jenis Penggantian</dt><dd>${r.replacementType}${r.outstandingAsset?' <span class="tag stop" style="margin-left:6px"><span class="dot"></span>Outstanding Asset</span>':''}</dd>`;
+  if(r.jumlahSales) h+=`<dt>Jumlah Sales</dt><dd class="mono">${r.jumlahSales} <span class="hint" style="display:inline">(maks cadangan ${Math.floor(r.jumlahSales/5)})</span></dd>`;
+  return h;
+}
+function approvalAttachSummary(r){
+  const req=requiredAttachments({type:r.type,reqType:r.reqType,salesDivision:r.salesDivision,replacementType:r.replacementType,barcodeTypes:r.barcodeTypes});
+  if(!req.length) return '';
+  return `<div class="mt5" style="border-top:1px solid var(--line);padding-top:20px">
+    <div class="eyebrow" style="margin-bottom:12px">Lampiran (${req.filter(a=>r.attachments&&r.attachments[a.name]).length}/${req.length} terunggah)</div>
+    ${req.map(a=>{
+      const up=r.attachments&&r.attachments[a.name];
+      return `<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;padding:4px 0">
+        ${up?'<span class="tag go" style="height:18px"><span class="dot"></span>OK</span>':'<span class="tag warn" style="height:18px"><span class="dot"></span>—</span>'}
+        <span>${a.name}${up?` · <span class="mono">${up.fileName}</span>`:''}</span></div>`;
+    }).join('')}
+  </div>`;
+}
+function attachmentsCard(r){
+  const req=requiredAttachments({type:r.type,reqType:r.reqType,salesDivision:r.salesDivision,replacementType:r.replacementType,barcodeTypes:r.barcodeTypes});
+  if(!req.length) return '';
+  return `<div class="card mt4">
+    <div class="card-hd"><h3>Lampiran</h3><div class="r"><span class="hint">Dibuat &amp; ditandatangani di luar SSAMS — divalidasi Asset Team</span></div></div>
+    <div class="card-pad" style="padding-top:4px">
+      ${req.map((a,i)=>{
+        const up=r.attachments&&r.attachments[a.name];
+        return `<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:${i<req.length-1?'1px solid var(--line)':'none'}">
+          <span style="flex:none;margin-top:1px">${up?'<span class="tag go"><span class="dot"></span>Uploaded</span>':'<span class="tag warn"><span class="dot"></span>Pending</span>'}</span>
+          <div><div style="font-size:13px;font-weight:600">${a.name}</div>
+          <div class="hint">${up?`${up.fileName} · ${up.uploadedAt}`:a.note}</div></div>
+        </div>`;
+      }).join('')}
     </div>
   </div>`;
 }
@@ -896,7 +1066,7 @@ function viewNewRequest(){
       <div class="field">
         <label>Request Category <span class="req">*</span></label>
         <div class="seg-ctrl" id="seg-cat">
-          <button class="on" onclick="pickCategory(this,'Barcode')">Barcode</button><button onclick="pickCategory(this,'Android')">Android</button><button onclick="pickCategory(this,'Server')">Server</button>
+          <button class="on" onclick="pickCategory(this,'Barcode')">Barcode</button><button onclick="pickCategory(this,'Android')">Android</button><button onclick="pickCategory(this,'Server')">Server</button><button onclick="pickCategory(this,'Mobile Printer')">Mobile Printer</button>
         </div>
       </div>
       <div class="field" id="fld-distributor">
@@ -921,8 +1091,32 @@ function viewNewRequest(){
       </div>
       <div class="field" id="fld-reqtype" style="display:none">
         <label>Request Type <span class="req">*</span></label>
-        <select id="in-reqtype" class="ctrl"><option value="">Select type…</option>${REQ_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
+        <select id="in-reqtype" class="ctrl" onchange="syncNewReqForm()"><option value="">Select type…</option>${ANDROID_REQ_TYPES.map(t=>`<option>${t}</option>`).join('')}</select>
+        <div class="hint" id="hint-reqtype">Replace = tukar unit (ada referensi IMEI). Penambahan = unit MPP / cadangan baru.</div>
         <div class="err"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>Request Type wajib dipilih.</div>
+      </div>
+      <div class="field" id="fld-replacementtype" style="display:none">
+        <label>Jenis Penggantian <span class="req">*</span></label>
+        <select id="in-replacementtype" class="ctrl" onchange="syncNewReqForm()"><option value="">Select…</option><option>Subsidi</option><option>Non-subsidi</option></select>
+        <div class="hint">Subsidi = ditanggung perusahaan (butuh foto unit lama menyala). Non-subsidi = unit hilang, Subdist beli unit pengganti dari perusahaan; transaksi ditandai <b>Outstanding Asset</b> sampai lunas/terkirim.</div>
+        <div class="err"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>Jenis penggantian wajib dipilih.</div>
+      </div>
+      <div class="field" id="fld-barcode-types" style="display:none">
+        <label>Tipe Pengajuan <span class="req">*</span> — qty per tipe</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          ${BARCODE_REQ_TYPES.map(t=>`<div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:12.5px;flex:1">${t}</span>
+            <input class="ctrl mono bc-type-qty" data-type="${t}" inputmode="numeric" value="0" style="width:66px;height:32px;text-align:right" oninput="onBarcodeTypeInput()">
+          </div>`).join('')}
+        </div>
+        <div class="hint" style="margin-top:8px">Total Request = <b class="mono" id="bc-total">0</b> pcs (dihitung otomatis dari qty per tipe).</div>
+        <div class="err"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>Isi minimal 1 pcs pada salah satu tipe pengajuan.</div>
+      </div>
+      <div class="field" id="fld-jumlahsales" style="display:none">
+        <label>Jumlah Sales <span class="req">*</span></label>
+        <input id="in-jumlahsales" class="ctrl mono" inputmode="numeric" placeholder="mis. 30" oninput="syncNewReqForm()">
+        <div class="hint">Rasio minimal <b>5 sales : 1 unit cadangan</b>. Maks. cadangan = jumlah sales ÷ 5 (dibulatkan ke bawah). Di produksi angka ini kemungkinan diambil dari master data, bukan input manual.</div>
+        <div class="err"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>Jumlah sales wajib diisi & mencukupi rasio 5:1.</div>
       </div>
       <div class="grid-2" style="grid-template-columns:1fr 1fr;gap:16px">
         <div class="field" id="fld-reqrole">
@@ -938,9 +1132,9 @@ function viewNewRequest(){
       </div>
       <div class="grid-2" style="grid-template-columns:1fr 1fr;gap:16px">
         <div class="field" id="fld-qty">
-          <label>Quantity <span class="req">*</span></label>
-          <input id="in-qty" class="ctrl mono" inputmode="numeric" placeholder="e.g. 150">
-          <div class="hint">Jumlah dalam pcs</div>
+          <label id="lbl-qty">Quantity <span class="req">*</span></label>
+          <input id="in-qty" class="ctrl mono" inputmode="numeric" placeholder="e.g. 150" oninput="syncNewReqForm()">
+          <div class="hint" id="hint-qty">Jumlah dalam pcs</div>
           <div class="err"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>Quantity wajib diisi dengan angka.</div>
         </div>
         <div class="field" style="margin-bottom:0">
@@ -950,6 +1144,7 @@ function viewNewRequest(){
           </div>
         </div>
       </div>
+      <div id="req-attachments" style="margin-top:4px"></div>
     </div>
     <div>
       <div class="card card-pad">
@@ -985,18 +1180,88 @@ function onDistributorChange(v){
 function pickCategory(btn,cat){
   pickSeg(btn);
   populateRequesterRoleOptions(cat);
-  document.getElementById('fld-reqtype').style.display = cat==='Android' ? 'block' : 'none';
+  // reset conditional fields when switching category so stale values don't leak into validation
+  const rt=document.getElementById('in-reqtype'); if(rt) rt.value='';
+  const rp=document.getElementById('in-replacementtype'); if(rp) rp.value='';
+  syncNewReqForm();
+}
+// Show/hide every category/type-conditional field, keep the Barcode total + attachments + route in sync.
+function syncNewReqForm(){
+  const catBtn=document.querySelector('#seg-cat button.on');
+  if(!catBtn) return;
+  const cat=catBtn.textContent;
+  const reqType = document.getElementById('in-reqtype')?.value || '';
+  const show=(id,on)=>{ const el=document.getElementById(id); if(el) el.style.display = on?'block':'none'; };
+  // Section 1/2: Request Type only for Android (hidden entirely for Mobile Printer & the rest)
+  show('fld-reqtype', cat==='Android');
+  // Section 9: Jenis Penggantian only for Android + Replace
+  show('fld-replacementtype', cat==='Android' && reqType==='Replace');
+  // Section 4: Jumlah Sales only for Android + Penambahan (cadangan ratio check)
+  show('fld-jumlahsales', cat==='Android' && reqType==='Penambahan');
+  // Section 3: Barcode Tipe Pengajuan grid replaces the free Quantity input
+  show('fld-barcode-types', cat==='Barcode');
+  show('fld-qty', cat!=='Barcode');
+  const lblQty=document.getElementById('lbl-qty'), hintQty=document.getElementById('hint-qty');
+  if(cat==='Android' && reqType==='Penambahan'){
+    if(lblQty) lblQty.innerHTML='Qty unit cadangan <span class="req">*</span>';
+    if(hintQty) hintQty.textContent='Jumlah unit cadangan (MPP / spare) yang diminta.';
+  } else if(lblQty){ lblQty.innerHTML='Quantity <span class="req">*</span>'; if(hintQty) hintQty.textContent='Jumlah dalam pcs'; }
+  if(cat==='Barcode') onBarcodeTypeInput();
+  renderReqAttachments();
   updateRoutePreview();
+}
+function onBarcodeTypeInput(){
+  const el=document.getElementById('bc-total');
+  if(el) el.textContent = String(readBarcodeTypes().__total);
+  renderReqAttachments();
+}
+function readBarcodeTypes(){
+  const t={}; let total=0;
+  BARCODE_REQ_TYPES.forEach(k=>{
+    const el=document.querySelector(`.bc-type-qty[data-type="${k}"]`);
+    const v=el?(parseInt(el.value,10)||0):0; t[k]=v; total+=v;
+  });
+  t.__total=total;
+  return t;
+}
+function currentReqFormState(){
+  const catBtn=document.querySelector('#seg-cat button.on');
+  const cat=catBtn?catBtn.textContent:'Barcode';
+  return {
+    type:cat,
+    reqType: cat==='Android' ? (document.getElementById('in-reqtype')?.value||'') : null,
+    salesDivision: document.getElementById('in-division')?.value||'',
+    replacementType: document.getElementById('in-replacementtype')?.value||'',
+    barcodeTypes: cat==='Barcode' ? readBarcodeTypes() : null,
+  };
+}
+function renderReqAttachments(){
+  const host=document.getElementById('req-attachments'); if(!host) return;
+  const req=requiredAttachments(currentReqFormState());
+  if(!req.length){ host.innerHTML=''; return; }
+  host.innerHTML=`
+    <div class="field" id="fld-attachments" style="margin-bottom:0;margin-top:20px;border-top:1px solid var(--line);padding-top:20px">
+      <label>Lampiran wajib <span class="req">*</span></label>
+      <div class="hint" style="margin-bottom:10px">Dokumen dibuat &amp; ditandatangani <b>di luar SSAMS</b>, lalu diunggah di sini untuk divalidasi Asset Team terhadap dokumen fisik.</div>
+      ${req.map(a=>`
+        <div style="border:1px solid var(--line-2);border-radius:var(--r-md);padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:13px;font-weight:600;margin-bottom:2px">${a.name}</div>
+          <div class="hint" style="margin-bottom:8px">${a.note}</div>
+          <input type="file" class="ctrl req-attach-file" data-name="${a.name}" style="height:34px;padding:6px" onchange="syncNewReqForm()">
+        </div>`).join('')}
+      <div class="err"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>Semua lampiran wajib harus diunggah.</div>
+    </div>`;
 }
 function updateRoutePreview(){
   const catBtn=document.querySelector('#seg-cat button.on');
   if(!catBtn) return;
   const cat=catBtn.textContent;
+  const reqType = cat==='Android' ? (document.getElementById('in-reqtype')?.value||'') : undefined;
   const roleSel=document.getElementById('in-reqrole');
   const role=roleSel?roleSel.value:'';
   const el=document.getElementById('route-preview');
-  const full=CATEGORY_HIERARCHY[cat]||[];
-  const chain = role ? computeChain(cat,role) : full;
+  const full=categoryHierarchy(cat, reqType);
+  const chain = role ? computeChain(cat,role,reqType) : full;
   if(role && chain.length===0){
     el.innerHTML=`<div class="callout" style="margin:0">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>
@@ -1091,9 +1356,11 @@ function viewApprovalDetail(id){
           <dt>Quantity</dt><dd class="mono">${r.qty} pcs</dd>
           <dt>Priority</dt><dd>${priTag(r.pri)}</dd>
           ${r.reqType?`<dt>Request Type</dt><dd>${r.reqType}</dd>`:''}
+          ${reqDetailRows(r)}
           <dt>Requested by</dt><dd>${r.by} · ${ROLE_LABELS[r.byRole]||r.byRole}</dd>
           <dt>Submitted</dt><dd class="mono">${r.date}</dd>
         </dl>
+        ${approvalAttachSummary(r)}
         <div class="mt5" style="border-top:1px solid var(--line);padding-top:20px">
           <div class="eyebrow" style="margin-bottom:12px">Approval history</div>
           ${timeline(r.hist)}
@@ -1224,10 +1491,13 @@ function viewFulfillmentDetail(id){
           <dt>Quantity</dt><dd class="mono">${r.qty} pcs</dd>
           <dt>Priority</dt><dd>${priTag(r.pri)}</dd>
           ${r.reqType?`<dt>Request Type</dt><dd>${r.reqType}</dd>`:''}
+          ${reqDetailRows(r)}
           <dt>Requested by</dt><dd>${r.by} · ${ROLE_LABELS[r.byRole]||r.byRole}</dd>
           <dt>Submitted</dt><dd class="mono">${r.date}</dd>
         </dl>
+        ${shippingNote(r)}
         ${fulfillDataSummary(r)}
+        ${fulfillDocsCard(r)}
         <div class="mt5" style="border-top:1px solid var(--line);padding-top:20px">
           <div class="eyebrow" style="margin-bottom:12px">Approval history</div>
           ${timeline(r.hist)}
@@ -1261,6 +1531,47 @@ function viewFulfillmentDetail(id){
       </div>
     </div>
   </div>`;
+}
+// Section 7: shipping-destination differs by category; Server is a 6-month installment.
+function shippingNote(r){
+  const pat=SHIPPING_PATTERN[r.type]||'hq';
+  const dest = pat==='dropship'
+    ? `Dropship — dikirim langsung ke cabang / Subdist${r.fulfillData&&r.fulfillData.shipTo?` (<b>${r.fulfillData.shipTo}</b>)`:''}.`
+    : `Dikirim ke HQ / Asset Team dulu${r.type==='Android'?' — proses BA Kepemilikan sebelum diteruskan ke Subdist':''}.`;
+  const installment = r.type==='Server'
+    ? `<div style="margin-top:8px"><span class="tag brand"><span class="dot"></span>Cicilan 6 bulan</span> <span class="hint" style="display:inline">Pembayaran server dicicil bulanan oleh Subdist — penagihan ditangani sistem Finance terpisah.</span></div>`
+    : '';
+  return `<div class="mt5" style="border-top:1px solid var(--line);padding-top:20px">
+    <div class="eyebrow" style="margin-bottom:8px">Pengiriman</div>
+    <p style="font-size:12.5px;color:var(--ink-2);line-height:1.6">${dest}</p>
+    ${installment}
+  </div>`;
+}
+// Section 6/7: documents produced DURING fulfillment — checklist + per-item upload slot.
+function fulfillDocsCard(r){
+  const docs=fulfillmentDocs(r);
+  return `<div class="mt5" style="border-top:1px solid var(--line);padding-top:20px">
+    <div class="eyebrow" style="margin-bottom:12px">Dokumen fulfillment</div>
+    ${docs.map((d,i)=>{
+      const up=r.fulfillDocs&&r.fulfillDocs[d.name];
+      return `<div style="padding:10px 0;border-bottom:${i<docs.length-1?'1px solid var(--line)':'none'}">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          ${up?'<span class="tag go" style="height:18px"><span class="dot"></span>Uploaded</span>':'<span class="tag warn" style="height:18px"><span class="dot"></span>Pending upload</span>'}
+          <span style="font-size:13px;font-weight:600">${d.name}</span>
+        </div>
+        <div class="hint" style="margin-bottom:6px">${up?`${up.fileName} · ${up.uploadedAt}`:d.note}</div>
+        <input type="file" class="ctrl" style="height:32px;padding:5px" onchange="uploadFulfillDoc('${r.id}','${d.name}',this)">
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+function uploadFulfillDoc(id,name,input){
+  const r=REQUESTS.find(x=>x.id===id); if(!r||!input.files.length) return;
+  const today=new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+  r.fulfillDocs=r.fulfillDocs||{};
+  r.fulfillDocs[name]={fileName:input.files[0].name,uploadedAt:today};
+  toast(`${name} diunggah.`);
+  render();
 }
 function fulfillDataForm(r){
   if(r.type==='Barcode'){
@@ -1322,13 +1633,25 @@ function fulfillDataForm(r){
       <div class="err"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>Semua ${r.qty} unit wajib lengkap (IMEI, merk, jenis, tahun rilis, tahun registrasi).</div>
     </div>`;
   }
+  const isServer=r.type==='Server';
+  const label = isServer ? 'Spesifikasi Server / PC' : 'Spesifikasi Mobile Printer';
+  const hint = isServer
+    ? 'Catat kebutuhan/spesifikasi server atau PC untuk keperluan procurement (agregat, bukan per-unit).'
+    : 'Catat spesifikasi / kebutuhan Mobile Printer (agregat). Format pencatatan belum ditetapkan bisnis — placeholder.';
   return `
-  <div class="field" id="fld-specs" style="margin-bottom:0">
-    <label>Spesifikasi Server / PC <span class="req">*</span></label>
+  <div class="field" id="fld-specs" style="margin-bottom:${isServer?'12px':'0'}">
+    <label>${label} <span class="req">*</span></label>
     <textarea id="in-specs" class="ctrl" style="height:auto;min-height:90px;padding:10px 12px" placeholder="Mis. CPU, RAM, storage, OS, kebutuhan khusus..."></textarea>
-    <div class="hint">Catat kebutuhan/spesifikasi server atau PC untuk keperluan procurement (agregat, bukan per-unit).</div>
+    <div class="hint">${hint}</div>
     <div class="err"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>Spesifikasi wajib diisi.</div>
-  </div>`;
+  </div>
+  ${isServer?`
+  <div class="field" id="fld-shipto" style="margin-bottom:0">
+    <label>Alamat pengiriman (dropship) <span class="req">*</span></label>
+    <textarea id="in-shipto" class="ctrl" style="height:auto;min-height:64px;padding:10px 12px" placeholder="Alamat lengkap cabang / Subdist tujuan..."></textarea>
+    <div class="hint">Server dikirim langsung ke cabang / Subdist (tidak lewat HQ).</div>
+    <div class="err"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v4M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg>Alamat pengiriman wajib diisi.</div>
+  </div>`:''}`;
 }
 function fulfillDataSummary(r){
   if(!r.fulfillData) return '';
@@ -1351,6 +1674,8 @@ function fulfillDataSummary(r){
   return `<div class="mt5" style="border-top:1px solid var(--line);padding-top:20px">
     <div class="eyebrow" style="margin-bottom:12px">Spesifikasi tercatat</div>
     <p style="font-size:13px;color:var(--ink-2);white-space:pre-line">${d.specs}</p>
+    ${d.shipTo?`<div class="eyebrow" style="margin:14px 0 8px">Alamat pengiriman</div>
+      <p style="font-size:13px;color:var(--ink-2);white-space:pre-line">${d.shipTo}</p>`:''}
   </div>`;
 }
 function toggleManualInput(sel,manualId){
@@ -1470,6 +1795,11 @@ function saveFulfillData(id){
     const specs=(document.getElementById('in-specs').value||'').trim();
     setErr('fld-specs', !specs);
     data={specs};
+    if(r.type==='Server'){
+      const shipTo=(document.getElementById('in-shipto').value||'').trim();
+      setErr('fld-shipto', !shipTo);
+      data.shipTo=shipTo;
+    }
   }
   if(!ok) return;
   r.fulfillData=data;
@@ -1509,41 +1839,69 @@ function submitReq(){
   const category=document.querySelector('#seg-cat button.on').textContent;
 
   const fldQty=document.getElementById('fld-qty'), inp=document.getElementById('in-qty');
+  const fldBcTypes=document.getElementById('fld-barcode-types');
   const fldOutlet=document.getElementById('fld-outlet'), selOutlet=document.getElementById('in-outlet');
   const fldDist=document.getElementById('fld-distributor'), selDist=document.getElementById('in-distributor'), inpDistManual=document.getElementById('in-distributor-manual');
   const fldDiv=document.getElementById('fld-division'), selDiv=document.getElementById('in-division');
   const fldRole=document.getElementById('fld-reqrole'), selRole=document.getElementById('in-reqrole');
   const fldName=document.getElementById('fld-reqname'), inpName=document.getElementById('in-reqname');
   const fldType=document.getElementById('fld-reqtype'), selType=document.getElementById('in-reqtype');
+  const fldRepl=document.getElementById('fld-replacementtype'), selRepl=document.getElementById('in-replacementtype');
+  const fldSales=document.getElementById('fld-jumlahsales'), inpSales=document.getElementById('in-jumlahsales');
 
-  const n=parseInt((inp.value||'').trim(),10);
   const outlet=selOutlet.value;
   const distributor = selDist.value==='__other__' ? (inpDistManual.value||'').trim() : selDist.value;
   const division=selDiv.value;
   const reqRole=selRole.value;
   const reqName=(inpName.value||'').trim();
   const reqType = category==='Android' ? selType.value : null;
+  const replacementType = (category==='Android' && reqType==='Replace') ? selRepl.value : null;
+  const jumlahSales = (category==='Android' && reqType==='Penambahan') ? parseInt((inpSales.value||'').trim(),10) : null;
+
+  // Section 3: Barcode qty comes from the per-type breakdown; every other category uses the free qty input.
+  const bc = category==='Barcode' ? readBarcodeTypes() : null;
+  const barcodeTypes = bc ? {Rusak:bc.Rusak,Hilang:bc.Hilang,NOO:bc.NOO,'Buffer Stock':bc['Buffer Stock']} : null;
+  const n = category==='Barcode' ? (bc.__total) : parseInt((inp.value||'').trim(),10);
 
   let ok=true;
-  const setErr=(fld,bad)=>{ fld.classList.toggle('error',bad); if(bad) ok=false; };
-  setErr(fldQty, !n||n<1);
+  const setErr=(fld,bad)=>{ if(!fld) return; fld.classList.toggle('error',bad); if(bad) ok=false; };
+  if(category==='Barcode'){ setErr(fldBcTypes, !n||n<1); fldQty.classList.remove('error'); }
+  else { setErr(fldQty, !n||n<1); fldBcTypes && fldBcTypes.classList.remove('error'); }
   setErr(fldOutlet, !outlet);
   setErr(fldDist, !distributor);
   setErr(fldDiv, !division);
   setErr(fldRole, !reqRole);
   setErr(fldName, !reqName);
   if(category==='Android') setErr(fldType, !reqType); else fldType.classList.remove('error');
+  if(category==='Android' && reqType==='Replace') setErr(fldRepl, !replacementType); else fldRepl.classList.remove('error');
+  // Section 4: Android cadangan ratio 5 sales : 1 unit
+  if(category==='Android' && reqType==='Penambahan'){
+    const maxCadangan = jumlahSales>0 ? Math.floor(jumlahSales/5) : 0;
+    setErr(fldSales, !(jumlahSales>0) || n>maxCadangan);
+  } else fldSales.classList.remove('error');
+
+  // Section 6: required-attachment gate
+  const attachFiles=[...document.querySelectorAll('.req-attach-file')];
+  const fldAttach=document.getElementById('fld-attachments');
+  const missingAttach=attachFiles.some(el=>!el.files.length);
+  if(fldAttach) setErr(fldAttach, missingAttach);
+
   if(!ok){
     const firstBad=document.querySelector('.field.error .ctrl, .field.error input');
     if(firstBad) firstBad.focus();
+    toast('Lengkapi field & lampiran yang ditandai merah.');
     return;
   }
 
+  const today=new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+  const attachments={};
+  attachFiles.forEach(el=>{ attachments[el.dataset.name]={fileName:el.files[0].name,uploadedAt:today}; });
+
   const pri=document.querySelector('#seg-pri button.on').textContent.toLowerCase();
   const id='REQ-'+(reqSeq++);
-  const today=new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
   const req=mkReq({id,outlet,category,qty:n,pri,distributor,salesDivision:division,
-    requesterRole:reqRole,requesterName:reqName,reqType,date:today,step:0});
+    requesterRole:reqRole,requesterName:reqName,reqType,replacementType,jumlahSales,
+    barcodeTypes,attachments,date:today,step:0});
   REQUESTS.unshift(req);
   toast(req.chain.length===0
     ? 'Request otomatis disetujui — langsung ke Fulfillment'
@@ -1605,7 +1963,7 @@ function settingsDistributors(){
   </div>`;
 }
 function settingsTypes(){
-  const rows=[['Barcode','BC','No'],['Android','AN','Yes — IMEI required'],['Server','SR','Yes — Serial required']];
+  const rows=[['Barcode','BC','No'],['Android','AN','Yes — IMEI required'],['Server','SR','Yes — Serial required'],['Mobile Printer','MP','No']];
   return `<div class="card">
     <div class="card-hd"><h3>Asset types</h3><div class="r">
       <button class="btn btn-primary btn-sm"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>Add type</button></div></div>
@@ -1632,11 +1990,15 @@ function settingsFlow(){
   </div>
   <div class="grid-2">
     ${col('Barcode', CATEGORY_HIERARCHY.Barcode)}
-    ${col('Android &amp; Server', CATEGORY_HIERARCHY.Android)}
+    ${col('Server', CATEGORY_HIERARCHY.Server)}
+    ${col('Android — Replace <span class="hint" style="display:inline">(berhenti di NSM)</span>', ANDROID_HIERARCHY_BY_TYPE.Replace)}
+    ${col('Android — Penambahan <span class="hint" style="display:inline">(berhenti di GRSM)</span>', ANDROID_HIERARCHY_BY_TYPE.Penambahan)}
+    ${col('Mobile Printer <span class="hint" style="display:inline">(placeholder — mirror Server)</span>', CATEGORY_HIERARCHY['Mobile Printer'])}
   </div>
   <div class="card card-pad mt4">
     <div class="eyebrow" style="margin-bottom:10px">Cara kerja rute dinamis</div>
-    <p style="font-size:13px;color:var(--ink-2);line-height:1.6">Approval chain untuk tiap request = semua level di atas Requester Role yang dipilih. Contoh: request Barcode dengan Requester Role <b>RSM</b> hanya perlu approval <b>GRSM → NSM → SD</b> (level SA/SS dilewati karena di bawah requester). Kalau Requester Role sudah di level tertinggi (SD), request otomatis disetujui dan langsung masuk ke <b>Fulfillment</b> tanpa approval.</p>
+    <p style="font-size:13px;color:var(--ink-2);line-height:1.6">Approval chain untuk tiap request = semua level di atas Requester Role yang dipilih. Contoh: request Barcode dengan Requester Role <b>RSM</b> hanya perlu approval <b>GRSM → NSM → SD</b> (level SA/SS dilewati karena di bawah requester). Kalau Requester Role sudah di level tertinggi, request otomatis disetujui dan langsung masuk ke <b>Fulfillment</b> tanpa approval.</p>
+    <p style="font-size:13px;color:var(--ink-2);line-height:1.6;margin-top:8px"><b>Android</b>: plafon rantai tergantung Request Type — <b>Replace</b> berhenti di NSM, <b>Penambahan</b> berhenti di GRSM. Sales Director tidak pernah meng-approve request Android.</p>
   </div>`;
 }
 function settingsUsers(){
@@ -1669,7 +2031,7 @@ function requestTable(rows,mod,isFiltered){
         <td class="num">${r.qty}</td>
         <td>${priTag(r.pri)}</td>
         <td>${chainMini(r.chain)}</td>
-        <td>${statusTag(r)}</td>
+        <td>${statusTag(r)}${r.outstandingAsset?' <span class="tag stop" style="margin-left:4px"><span class="dot"></span>Outstanding</span>':''}</td>
       </tr>`).join('')}</tbody></table>`;
 }
 function approvalTable(rows,mod){
