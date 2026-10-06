@@ -467,7 +467,7 @@ a{color:inherit}
     <div class="crumb" id="crumb"></div>
     <div class="search">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
-      <input placeholder="Cari REQ-ID, outlet, barcode…">
+      <input placeholder="Search...">
     </div>
     <button class="iconbtn" id="themebtn" onclick="toggleTheme()" title="Switch light / dark" aria-label="Switch light or dark theme">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 010 18z" fill="currentColor" stroke="none"/></svg>
@@ -524,17 +524,18 @@ const ROLE_LABELS = {
   Cabang:'Cabang / Distributor',
 };
 const CATEGORY_HIERARCHY = {
-  Barcode: ['SA','SS','RSM','GRSM','NSM','SD'],
-  Server:  ['Cabang','GRSM','NSM','SD'],
-  // PLACEHOLDER (Section 2): Mobile Printer approval hierarchy not yet specified by the
-  // business — defaulted to mirror Server (no Replace path). MUST be confirmed before ship.
+  // Barcode approval ceiling trimmed to GRSM (2026-09-21 revision) — NSM/SD no longer approve Barcode.
+  Barcode: ['SA','SS','RSM','GRSM'],
+  // Server no longer requires approval (2026-09-21 revision) — every Server request auto-approves
+  // straight to Fulfillment (empty chain).
+  Server:  [],
+  // Mobile Printer mirrors Android's hierarchy (2026-09-21 revision, confirmed by business).
   'Mobile Printer': ['Cabang','GRSM','NSM','SD'],
 };
-// Android's approval-chain CEILING depends on the request type (Section 1 REVISION).
-// Sales Director never approves Android under either path.
+// Android approval ceiling raised to Sales Director for both request types (2026-09-21 revision).
 const ANDROID_HIERARCHY_BY_TYPE = {
-  'Replace':    ['Cabang','GRSM','NSM'], // unit swap (has IMEI reference) — stops at NSM
-  'Penambahan': ['Cabang','GRSM'],       // new MPP / spare unit — stops at GRSM
+  'Replace':    ['Cabang','GRSM','NSM','SD'],
+  'Penambahan': ['Cabang','GRSM','NSM','SD'],
 };
 function categoryHierarchy(category, requestType){
   if(category==='Android') return ANDROID_HIERARCHY_BY_TYPE[requestType] || ANDROID_HIERARCHY_BY_TYPE['Replace'];
@@ -542,7 +543,7 @@ function categoryHierarchy(category, requestType){
 }
 // role yang boleh dipilih sebagai Requester Role di form (subset dari hierarki di atas)
 const REQUESTER_ROLES_BY_CATEGORY = {
-  Barcode: ['SA','SS','RSM','GRSM','NSM','SD'],
+  Barcode: ['SA','SS','RSM','GRSM'],
   Android: ['Cabang'],           // Section 1: SD removed — no longer a valid Android requester
   Server:  ['Cabang','SD'],
   'Mobile Printer': ['Cabang','SD'],
@@ -691,7 +692,7 @@ let REQUESTS = [
     date:'08 Jul 2026',step:-1}),
   mkReq({id:'REQ-2074',outlet:'Medan Kota',category:'Android',qty:3,pri:'normal',
     distributor:'PT Mitra Jaya Abadi',salesDivision:'M245',requesterRole:'Cabang',requesterName:'Bu Lita',
-    reqType:'Replace',replacementType:'Subsidi',date:'05 Jul 2026',step:2,fulfillStep:3,
+    reqType:'Replace',replacementType:'Subsidi',date:'05 Jul 2026',step:3,fulfillStep:3,
     fulfillData:{units:[
       {imei:'356938035643809',brand:'Samsung',model:'A54',releaseYear:'2023',regYear:'2026'},
       {imei:'356938035643810',brand:'Samsung',model:'A54',releaseYear:'2023',regYear:'2026'},
@@ -699,9 +700,9 @@ let REQUESTS = [
     ]},
     fulfillDocs:{'PO dari Vendor':{fileName:'PO-88090.pdf',uploadedAt:'05 Jul 2026'},
       'BA Kepemilikan':{fileName:'BA-Kepemilikan-2074.pdf',uploadedAt:'08 Jul 2026'}}}),
-  mkReq({id:'REQ-2070',outlet:'Cirebon Kota',category:'Server',qty:2,pri:'urgent',
+  mkReq({id:'REQ-2070',outlet:'Cirebon Kota',category:'Android',qty:2,pri:'urgent',
     distributor:'CV Sumber Makmur',salesDivision:'M3',requesterRole:'Cabang',requesterName:'Andi P.',
-    date:'03 Jul 2026',step:-2}),
+    reqType:'Replace',replacementType:'Subsidi',date:'03 Jul 2026',step:-2}),
 ];
 // step = index node "current" di r.chain. -1 = revisi. -2 = rejected. step===chain.length = approval selesai.
 function mkReq(o){
@@ -1989,16 +1990,18 @@ function settingsFlow(){
     <div>Rute approval sekarang <b>dinamis</b> — dihitung otomatis dari kategori request dan Requester Role yang dipilih. Berikut hierarki lengkap per kategori (dari level terendah ke tertinggi).</div>
   </div>
   <div class="grid-2">
-    ${col('Barcode', CATEGORY_HIERARCHY.Barcode)}
-    ${col('Server', CATEGORY_HIERARCHY.Server)}
-    ${col('Android — Replace <span class="hint" style="display:inline">(berhenti di NSM)</span>', ANDROID_HIERARCHY_BY_TYPE.Replace)}
-    ${col('Android — Penambahan <span class="hint" style="display:inline">(berhenti di GRSM)</span>', ANDROID_HIERARCHY_BY_TYPE.Penambahan)}
-    ${col('Mobile Printer <span class="hint" style="display:inline">(placeholder — mirror Server)</span>', CATEGORY_HIERARCHY['Mobile Printer'])}
+    ${col('Barcode <span class="hint" style="display:inline">(berhenti di GRSM)</span>', CATEGORY_HIERARCHY.Barcode)}
+    ${CATEGORY_HIERARCHY.Server.length
+      ? col('Server', CATEGORY_HIERARCHY.Server)
+      : `<div class="card card-pad"><div class="eyebrow" style="margin-bottom:16px">Server</div>
+         <div style="font-size:13px;color:var(--ink-2)">Tidak perlu approval — request Server langsung masuk ke <b>Fulfillment</b>.</div></div>`}
+    ${col('Android <span class="hint" style="display:inline">(berhenti di Sales Director)</span>', ANDROID_HIERARCHY_BY_TYPE.Replace)}
+    ${col('Mobile Printer <span class="hint" style="display:inline">(sama seperti Android)</span>', CATEGORY_HIERARCHY['Mobile Printer'])}
   </div>
   <div class="card card-pad mt4">
     <div class="eyebrow" style="margin-bottom:10px">Cara kerja rute dinamis</div>
-    <p style="font-size:13px;color:var(--ink-2);line-height:1.6">Approval chain untuk tiap request = semua level di atas Requester Role yang dipilih. Contoh: request Barcode dengan Requester Role <b>RSM</b> hanya perlu approval <b>GRSM → NSM → SD</b> (level SA/SS dilewati karena di bawah requester). Kalau Requester Role sudah di level tertinggi, request otomatis disetujui dan langsung masuk ke <b>Fulfillment</b> tanpa approval.</p>
-    <p style="font-size:13px;color:var(--ink-2);line-height:1.6;margin-top:8px"><b>Android</b>: plafon rantai tergantung Request Type — <b>Replace</b> berhenti di NSM, <b>Penambahan</b> berhenti di GRSM. Sales Director tidak pernah meng-approve request Android.</p>
+    <p style="font-size:13px;color:var(--ink-2);line-height:1.6">Approval chain untuk tiap request = semua level di atas Requester Role yang dipilih. Contoh: request Barcode dengan Requester Role <b>RSM</b> hanya perlu approval <b>GRSM</b> (level SA/SS dilewati karena di bawah requester, dan NSM/SD tidak lagi approve Barcode). Kalau Requester Role sudah di level tertinggi, atau kategorinya tidak memerlukan approval (Server), request otomatis disetujui dan langsung masuk ke <b>Fulfillment</b> tanpa approval.</p>
+    <p style="font-size:13px;color:var(--ink-2);line-height:1.6;margin-top:8px"><b>Android</b> dan <b>Mobile Printer</b> berbagi hierarki yang sama: Cabang → GRSM → NSM → Sales Director.</p>
   </div>`;
 }
 function settingsUsers(){
