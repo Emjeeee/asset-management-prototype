@@ -148,6 +148,11 @@ a{color:inherit}
 .iconbtn:hover{background:var(--surface-2);color:var(--ink);border-color:var(--line-2)}
 .iconbtn:active{transform:scale(.94)}
 
+/* pointer cursor on every clickable element (disabled controls keep the default) */
+button:not(:disabled),[onclick],a[href],label[for],select,summary,
+.nav a,.clickable,.seg-ctrl button,.tabs button,.rolesw>button,.iconbtn{cursor:pointer}
+button:disabled,[aria-disabled="true"]{cursor:not-allowed}
+
 /* role switcher */
 .rolesw{position:relative}
 .rolesw>button{display:flex;align-items:center;gap:var(--s2);height:32px;
