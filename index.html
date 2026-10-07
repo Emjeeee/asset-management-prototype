@@ -99,16 +99,28 @@ a{color:inherit}
 /* ============================================================
    APP SHELL
    ============================================================ */
-.app{display:grid;grid-template-columns:var(--nav-w) 1fr;
+.app{--sb-w:var(--nav-w);display:grid;grid-template-columns:var(--sb-w) 1fr;
   grid-template-rows:var(--top-h) 1fr;min-height:100vh;
   grid-template-areas:"brand top" "nav main"}
+/* collapsed sidebar: icon-only rail */
+.app.sb-collapsed{--sb-w:64px}
+.app.sb-collapsed .brand{padding:0;justify-content:center}
+.app.sb-collapsed .brand .logo,.app.sb-collapsed .brand .name{display:none}
+.app.sb-collapsed .brand .sb-toggle{margin:0}
+.app.sb-collapsed .sb-toggle svg{transform:rotate(180deg)}
+.app.sb-collapsed .nav{padding:var(--s4) 10px}
+.app.sb-collapsed .nav .lab,.app.sb-collapsed .nav .foot,.app.sb-collapsed .nav a span{display:none}
+.app.sb-collapsed .nav a{justify-content:center;padding:10px 0;position:relative}
+.app.sb-collapsed .nav a .badge{position:absolute;top:3px;right:3px;min-width:14px;height:14px;
+  padding:0 3px;font-size:9px;margin-left:0}
 
 /* brand corner */
 /* brand & topbar are pinned with fixed positioning: they live in a one-row grid cell,
    where position:sticky cannot travel, so they'd scroll away and break the shell.
    The grid row stays as a placeholder, so the content below doesn't shift. */
 .brand{grid-area:brand;display:flex;align-items:center;gap:var(--s3);
-  position:fixed;top:0;left:0;width:var(--nav-w);height:var(--top-h);z-index:var(--z-menu);
+  position:fixed;top:0;left:0;width:var(--sb-w);height:var(--top-h);z-index:var(--z-menu);
+  transition:width .2s ease;
   padding:0 var(--s4);border-right:1px solid var(--line);
   border-bottom:1px solid var(--line);background:var(--surface)}
 .brand .logo{width:30px;height:30px;border-radius:var(--r-sm);flex:none;
@@ -120,12 +132,15 @@ a{color:inherit}
      #fff 3px 4px,transparent 4px 7px,#fff 7px 8.5px,transparent 8.5px 12px);
   opacity:.9;left:7px;right:7px;top:8px;bottom:8px}
 .brand .name{font-weight:700;font-size:14.5px;letter-spacing:-.02em}
+.brand .sb-toggle{margin-left:auto;width:28px;height:28px}
+.app{transition:grid-template-columns .2s ease}
+@media (max-width:1000px){ .brand .sb-toggle{display:none} }
 .brand .name small{display:block;font-weight:500;font-size:10px;
   letter-spacing:.04em;color:var(--muted);font-family:var(--mono)}
 
 /* topbar */
 .top{grid-area:top;display:flex;align-items:center;gap:var(--s4);
-  position:fixed;top:0;left:var(--nav-w);right:0;height:var(--top-h);
+  position:fixed;top:0;left:var(--sb-w);right:0;height:var(--top-h);
   padding:0 var(--s5);border-bottom:1px solid var(--line);background:var(--surface);
   z-index:var(--z-menu)}
 .crumb{display:flex;align-items:center;gap:var(--s2);color:var(--muted);
@@ -472,6 +487,9 @@ button:disabled,[aria-disabled="true"]{cursor:not-allowed}
   <div class="brand">
     <div class="logo"></div>
     <div class="name">SYSTEM SUPPORT<small>Asset Management</small></div>
+    <button class="iconbtn sb-toggle" id="sb-toggle" onclick="toggleSidebar()" title="Collapse sidebar" aria-label="Collapse sidebar">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
   </div>
 
   <header class="top">
@@ -790,7 +808,7 @@ function renderNav(){
       let badge='';
       if(m==='approvals'&&pendingCount>0) badge=`<span class="badge">${pendingCount}</span>`;
       if(m==='fulfillment'&&fulfillCount>0) badge=`<span class="badge">${fulfillCount}</span>`;
-      return `<a class="${m===state.module?'active':''}" onclick="go('${m}')">
+      return `<a class="${m===state.module?'active':''}" onclick="go('${m}')" title="${MODULES[m].label}">
         ${MODULES[m].icon()} <span>${MODULES[m].label}</span>${badge}</a>`;
     }).join('')+
     `<div class="foot">Signed in as<br><span class="mono">${ROLES[state.role].label}</span><br>
@@ -2132,7 +2150,24 @@ function skeletonMain(){
     <div class="stats">${[0,0,0,0].map(()=>`<div class="card card-pad">${bar('60%',12)}<div class="skeleton sk" style="width:50%;height:30px;margin-top:14px"></div></div>`).join('')}</div>
     <div class="grid-2">${card}${card}</div></div>`;
 }
+/* sidebar collapse — pilihan user diingat di browser (localStorage, best-effort) */
+function applySidebar(collapsed){
+  const app=document.querySelector('.app');
+  app.classList.toggle('sb-collapsed', collapsed);
+  const btn=document.getElementById('sb-toggle');
+  if(btn){
+    const label = collapsed?'Expand sidebar':'Collapse sidebar';
+    btn.title = label; btn.setAttribute('aria-label', label);
+  }
+}
+function toggleSidebar(){
+  const collapsed=!document.querySelector('.app').classList.contains('sb-collapsed');
+  applySidebar(collapsed);
+  try{ localStorage.setItem('ssams-sidebar', collapsed?'collapsed':'expanded'); }catch(e){}
+}
 function boot(){
+  let saved=null; try{ saved=localStorage.getItem('ssams-sidebar'); }catch(e){}
+  applySidebar(saved==='collapsed');
   renderRoleMenu(); renderNav(); renderCrumb();
   document.getElementById('main').innerHTML=skeletonMain();
   setTimeout(render,600);
