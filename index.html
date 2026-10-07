@@ -104,7 +104,11 @@ a{color:inherit}
   grid-template-areas:"brand top" "nav main"}
 
 /* brand corner */
+/* brand & topbar are pinned with fixed positioning: they live in a one-row grid cell,
+   where position:sticky cannot travel, so they'd scroll away and break the shell.
+   The grid row stays as a placeholder, so the content below doesn't shift. */
 .brand{grid-area:brand;display:flex;align-items:center;gap:var(--s3);
+  position:fixed;top:0;left:0;width:var(--nav-w);height:var(--top-h);z-index:var(--z-menu);
   padding:0 var(--s4);border-right:1px solid var(--line);
   border-bottom:1px solid var(--line);background:var(--surface)}
 .brand .logo{width:30px;height:30px;border-radius:var(--r-sm);flex:none;
@@ -121,8 +125,9 @@ a{color:inherit}
 
 /* topbar */
 .top{grid-area:top;display:flex;align-items:center;gap:var(--s4);
+  position:fixed;top:0;left:var(--nav-w);right:0;height:var(--top-h);
   padding:0 var(--s5);border-bottom:1px solid var(--line);background:var(--surface);
-  position:relative;z-index:var(--z-menu)}
+  z-index:var(--z-menu)}
 .crumb{display:flex;align-items:center;gap:var(--s2);color:var(--muted);
   font-size:13px}
 .crumb b{color:var(--ink);font-weight:600}
@@ -442,6 +447,7 @@ a{color:inherit}
   .app{grid-template-columns:1fr;grid-template-rows:var(--top-h) 1fr auto;
     grid-template-areas:"top" "main" "nav"}
   .brand{display:none}
+  .top{left:0}
   .nav{position:fixed;bottom:0;left:0;right:0;top:auto;height:auto;flex-direction:row;
     justify-content:space-around;border-right:none;border-top:1px solid var(--line);
     padding:6px;z-index:var(--z-nav)}
