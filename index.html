@@ -90,7 +90,7 @@ a{color:inherit}
   letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
 
 /* glass surface — Spatial UI: frosted panels floating over the depth gradient */
-.brand,.top,.nav,.card,.stat,.rolesw>button,.rolesw .menu,.iconbtn,
+.corner,.top,.nav,.card,.stat,.rolesw>button,.rolesw .menu,.iconbtn,
 .btn-secondary,.btn-ghost,.field .ctrl,.top .search input,.fbar .fsearch input,
 .fbar select,.seg-ctrl{
   -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
@@ -104,9 +104,9 @@ a{color:inherit}
   grid-template-areas:"brand top" "nav main"}
 /* collapsed sidebar: icon-only rail */
 .app.sb-collapsed{--sb-w:64px}
-.app.sb-collapsed .brand{padding:0;justify-content:center}
-.app.sb-collapsed .brand .logo,.app.sb-collapsed .brand .name{display:none}
-.app.sb-collapsed .brand .sb-toggle{margin:0}
+.app.sb-collapsed .corner{padding:0;justify-content:center}
+.app.sb-collapsed .corner .logo,.app.sb-collapsed .corner .name{display:none}
+.app.sb-collapsed .corner .sb-toggle{margin:0}
 .app.sb-collapsed .sb-toggle svg{transform:rotate(180deg)}
 .app.sb-collapsed .nav{padding:var(--s4) 10px}
 .app.sb-collapsed .nav .lab,.app.sb-collapsed .nav .foot,.app.sb-collapsed .nav a span{display:none}
@@ -118,24 +118,24 @@ a{color:inherit}
 /* brand & topbar are pinned with fixed positioning: they live in a one-row grid cell,
    where position:sticky cannot travel, so they'd scroll away and break the shell.
    The grid row stays as a placeholder, so the content below doesn't shift. */
-.brand{grid-area:brand;display:flex;align-items:center;gap:var(--s3);
+.corner{grid-area:brand;display:flex;align-items:center;gap:var(--s3);
   position:fixed;top:0;left:0;width:var(--sb-w);height:var(--top-h);z-index:var(--z-menu);
   transition:width .2s ease;
   padding:0 var(--s4);border-right:1px solid var(--line);
   border-bottom:1px solid var(--line);background:var(--surface)}
-.brand .logo{width:30px;height:30px;border-radius:var(--r-sm);flex:none;
+.corner .logo{width:30px;height:30px;border-radius:var(--r-sm);flex:none;
   background:#12131A;
   display:grid;place-items:center;position:relative;overflow:hidden}
-.brand .logo::before{content:"";position:absolute;inset:0;
+.corner .logo::before{content:"";position:absolute;inset:0;
   background:
    repeating-linear-gradient(90deg,#fff 0 1.5px,transparent 1.5px 3px,
      #fff 3px 4px,transparent 4px 7px,#fff 7px 8.5px,transparent 8.5px 12px);
   opacity:.9;left:7px;right:7px;top:8px;bottom:8px}
-.brand .name{font-weight:700;font-size:14.5px;letter-spacing:-.02em}
-.brand .sb-toggle{margin-left:auto;width:28px;height:28px}
+.corner .name{font-weight:700;font-size:14.5px;letter-spacing:-.02em}
+.corner .sb-toggle{margin-left:auto;width:28px;height:28px}
 .app{transition:grid-template-columns .2s ease}
-@media (max-width:1000px){ .brand .sb-toggle{display:none} }
-.brand .name small{display:block;font-weight:500;font-size:10px;
+@media (max-width:1000px){ .corner .sb-toggle{display:none} }
+.corner .name small{display:block;font-weight:500;font-size:10px;
   letter-spacing:.04em;color:var(--muted);font-family:var(--mono)}
 
 /* topbar */
@@ -171,7 +171,7 @@ button:disabled,[aria-disabled="true"]{cursor:not-allowed}
 /* role switcher */
 .rolesw{position:relative}
 .rolesw>button{display:flex;align-items:center;gap:var(--s2);height:32px;
-  padding:0 8px 0 8px;border:1px solid var(--line);border-radius:var(--r-md);
+  padding:0 12px 0 10px;border:1px solid var(--line);border-radius:var(--r-md);
   background:var(--surface);transition:border-color .15s}
 .rolesw>button:hover{border-color:var(--line-2)}
 .rolesw .avatar{width:24px;height:24px;border-radius:var(--r-sm);flex:none;
@@ -466,7 +466,7 @@ button:disabled,[aria-disabled="true"]{cursor:not-allowed}
 @media (max-width:1000px){
   .app{grid-template-columns:1fr;grid-template-rows:var(--top-h) 1fr auto;
     grid-template-areas:"top" "main" "nav"}
-  .brand{display:none}
+  .corner{display:none}
   .top{left:0}
   .nav{position:fixed;bottom:0;left:0;right:0;top:auto;height:auto;flex-direction:row;
     justify-content:space-around;border-right:none;border-top:1px solid var(--line);
@@ -484,7 +484,7 @@ button:disabled,[aria-disabled="true"]{cursor:not-allowed}
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <div class="app">
-  <div class="brand">
+  <div class="corner">
     <div class="logo"></div>
     <div class="name">SYSTEM SUPPORT<small>Asset Management</small></div>
     <button class="iconbtn sb-toggle" id="sb-toggle" onclick="toggleSidebar()" title="Collapse sidebar" aria-label="Collapse sidebar">
